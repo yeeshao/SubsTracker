@@ -444,7 +444,7 @@ async function deleteSubscription(id, env) {
  *
  * @param {string} id
  * @param {any} env
- * @param {{ paymentDate?: string|Date, amount?: number, periodMultiplier?: number, note?: string }} options
+ * @param {{ paymentDate?: string|Date, amount?: number, periodMultiplier?: number, periodValue?: number, periodUnit?: string, note?: string }} options
  */
 async function manualRenewSubscription(id, env, options = {}) {
   try {
@@ -464,37 +464,46 @@ async function manualRenewSubscription(id, env, options = {}) {
       : now.utc;
     const amount = options.amount !== undefined ? options.amount : subscription.amount || 0;
     const periodMultiplier = options.periodMultiplier || 1;
+    const renewalPeriodValue = options.periodValue || subscription.periodValue;
+    const renewalPeriodUnit = options.periodUnit || subscription.periodUnit;
     const note = options.note || '手动续订';
     const mode = subscription.subscriptionMode || 'cycle';
 
-    let newStartDate;
+    // 续订的“计算起点”和订阅本身的“开始日期”是两个不同概念：
+    // - cycle：到期日用于计算新的到期日，但不能把它写回 subscription.startDate
+    // - reset：支付日用于计算新的到期日，同样不应覆盖原始 subscription.startDate
+    // 订阅开始日期代表这条订阅最初的开始日期，续订只延长到期日。
+    const originalStartDate = new Date(subscription.startDate);
     const currentExpiryDate = new Date(subscription.expiryDate);
+    let renewalBaseDate;
 
     if (mode === 'reset') {
-      newStartDate = new Date(paymentDate);
+      // 到期重置：从本次支付日期重新计算新的到期日。
+      renewalBaseDate = new Date(paymentDate);
     } else {
-      newStartDate =
-        currentExpiryDate.getTime() > paymentDate.getTime()
-          ? new Date(currentExpiryDate)
-          : new Date(paymentDate);
+      // 循环订阅：始终从原来的到期日继续累加周期。
+      // 即使订阅已经过期，也不能把起点改成当前日期。
+      renewalBaseDate = Number.isNaN(currentExpiryDate.getTime())
+        ? new Date(paymentDate)
+        : new Date(currentExpiryDate);
     }
 
     let newExpiryDate;
     if (subscription.useLunar) {
-      const solarStart = getTimezoneDateParts(newStartDate, timezone);
+      const solarStart = getTimezoneDateParts(renewalBaseDate, timezone);
       let lunar = lunarCalendar.solar2lunar(solarStart.year, solarStart.month, solarStart.day);
       let nextLunar = lunar;
       for (let i = 0; i < periodMultiplier; i++) {
-        nextLunar = lunarBiz.addLunarPeriod(nextLunar, subscription.periodValue, subscription.periodUnit);
+        nextLunar = lunarBiz.addLunarPeriod(nextLunar, renewalPeriodValue, renewalPeriodUnit);
       }
       const solar = lunarBiz.lunar2solar(nextLunar);
       newExpiryDate = buildTimezoneDate(solar.year, solar.month, solar.day, timezone);
     } else {
-      const totalPeriodValue = subscription.periodValue * periodMultiplier;
+      const totalPeriodValue = renewalPeriodValue * periodMultiplier;
       newExpiryDate = addCalendarPeriodInTimezone(
-        newStartDate,
+        renewalBaseDate,
         totalPeriodValue,
-        subscription.periodUnit,
+        renewalPeriodUnit,
         timezone,
         { endOfMonth: !!subscription.endOfMonth }
       );
@@ -507,7 +516,7 @@ async function manualRenewSubscription(id, env, options = {}) {
       currency: subscription.currency || 'CNY',
       type: 'manual',
       note,
-      periodStart: newStartDate.toISOString(),
+      periodStart: renewalBaseDate.toISOString(),
       periodEnd: newExpiryDate.toISOString()
     };
 
@@ -517,7 +526,10 @@ async function manualRenewSubscription(id, env, options = {}) {
 
     const updated = {
       ...subscription,
-      startDate: newStartDate.toISOString(),
+      // 续订不修改原始开始日期；仅更新到期日和支付日期。
+      startDate: Number.isNaN(originalStartDate.getTime())
+        ? subscription.startDate
+        : originalStartDate.toISOString(),
       expiryDate: newExpiryDate.toISOString(),
       lastPaymentDate: paymentDate.toISOString(),
       paymentHistory: trimmedPaymentHistory
