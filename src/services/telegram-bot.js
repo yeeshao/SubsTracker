@@ -618,7 +618,7 @@ async function beginRenew(config, chatId, env, id, messageId = null) {
   ]);
 }
 
-async function completeRenew(config, chatId, env, id, multiplier, messageId = null) {
+async function completeRenew(config, chatId, env, id, multiplier, messageId = null, pushSuccess = false) {
   const sub = await getSubscription(id, env);
   if (!sub) {
     await clearSession(env, chatId);
@@ -723,6 +723,24 @@ async function completeRenew(config, chatId, env, id, multiplier, messageId = nu
   ].join('\n');
 
   await editMessage(config, chatId, messageId, successText, keyboard);
+
+  // 快捷续订额外发送一条独立成功通知，避免用户只看到原提醒消息被编辑。
+  if (pushSuccess) {
+    const renewedAmount = formatAmount(amount, result.subscription.currency || 'CNY');
+    const pushText = [
+      '🎉 快捷续订成功！',
+      `📦 订阅：${result.subscription.name}`,
+      `🔄 续订周期：${n} 周期`,
+      renewedAmount ? `💰 本次金额：${renewedAmount}` : '',
+      `📅 新到期日期：${renewedExpiry}`
+    ].filter(Boolean).join('\n');
+    try {
+      await sendMessage(config, chatId, pushText);
+    } catch (error) {
+      // 独立通知发送失败不回滚已经完成的续订。
+      console.error('[TG Bot] 快捷续订成功通知发送失败:', error);
+    }
+  }
 }
 async function deleteSubscriptionFromTelegram(config, chatId, env, id, messageId = null) {
   const sub = await getSubscription(id, env);
@@ -1024,7 +1042,7 @@ async function handleCallback(config, chatId, env, data, messageId = null) {
   if (data.startsWith('renew:')) return beginRenew(config, chatId, env, data.slice(6), messageId);
   if (data.startsWith('quickrenew:')) {
     const [, id, multiplier] = data.split(':');
-    return completeRenew(config, chatId, env, id, Number(multiplier), messageId);
+    return completeRenew(config, chatId, env, id, Number(multiplier), messageId, true);
   }
   if (data.startsWith('renewconfirm:')) {
     const [, id, multiplier] = data.split(':');
